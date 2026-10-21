@@ -2,8 +2,8 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Player, RoomState, QuestionCategory, ChatMessage, ReactionEvent } from '../types';
 import { soundEffects } from '../utils/audio';
 import confetti from 'canvas-confetti';
-import { Peer, DataConnection } from 'peerjs';
 import { INITIAL_GEORGIAN_QUESTIONS } from '../data/defaultQuestions';
+import { createRoomMqttClient, RoomMqttHandle } from '../utils/mqttClient';
 
 interface UseGameSocketProps {
   player: Player;
@@ -60,26 +60,58 @@ export function useGameSocket({
   onSpinEnded,
 }: UseGameSocketProps) {
   const roomId = normalizeRoomId(rawRoomId);
-  const [room, setRoom] = useState<RoomState>(() => createDefaultRoom(roomId, player, roomName));
+
+  // Initialize room with local player immediately
+  const [room, setRoom] = useState<RoomState>(() => {
+    try {
+      const cached = localStorage.getItem(`geolove_room_${roomId}`);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed && Array.isArray(parsed.players)) {
+          const hasMe = parsed.players.some((p: Player) => p.id === player.id);
+          if (!hasMe) {
+            parsed.players = [player, ...parsed.players];
+          }
+          return parsed;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return createDefaultRoom(roomId, player, roomName);
+  });
+
   const [isConnected, setIsConnected] = useState(true);
   const [activeReactions, setActiveReactions] = useState<ReactionEvent[]>([]);
-  
+
+  // Connection references
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const lastStateHashRef = useRef<string>('');
-  
-  // Cross-Tab BroadcastChannel
+  const mqttHandleRef = useRef<RoomMqttHandle | null>(null);
   const bcRef = useRef<BroadcastChannel | null>(null);
+  const roomStateRef = useRef<RoomState>(room);
 
-  // WebRTC PeerJS References
-  const peerRef = useRef<Peer | null>(null);
-  const peerConnectionsRef = useRef<Map<string, DataConnection>>(new Map());
+  // Keep roomStateRef up to date
+  useEffect(() => {
+    roomStateRef.current = room;
+    try {
+      localStorage.setItem(`geolove_room_${roomId}`, JSON.stringify(room));
+    } catch {
+      // ignore
+    }
+  }, [room, roomId]);
 
-  // Broadcast data over WebRTC and BroadcastChannel
+  // Master Broadcast: pushes data across all real-time channels
   const broadcastAll = useCallback((payload: object) => {
-    const dataStr = JSON.stringify(payload);
-    // 1. BroadcastChannel (same browser tabs)
+    // 1. MQTT Cloud Relay (Works worldwide on Netlify, mobile, any browser)
+    try {
+      if (mqttHandleRef.current) {
+        mqttHandleRef.current.publish('events', payload);
+      }
+    } catch {
+      // ignore
+    }
+
+    // 2. BroadcastChannel (Same browser tabs sync with 0ms latency)
     try {
       if (bcRef.current) {
         bcRef.current.postMessage(payload);
@@ -87,19 +119,18 @@ export function useGameSocket({
     } catch {
       // ignore
     }
-    // 2. WebRTC Peer Data Channels (different devices/browsers)
-    for (const conn of peerConnectionsRef.current.values()) {
-      if (conn.open) {
-        try {
-          conn.send(dataStr);
-        } catch {
-          // ignore
-        }
+
+    // 3. Local WebSocket (when running with server.ts)
+    try {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify(payload));
       }
+    } catch {
+      // ignore
     }
   }, []);
 
-  // Handle incoming game events (shared by WS, WebRTC, and BroadcastChannel)
+  // Handle incoming game events from any network layer
   const handleGameEvent = useCallback((data: {
     type: string;
     room?: RoomState;
@@ -107,32 +138,90 @@ export function useGameSocket({
     durationMs?: number;
     message?: ChatMessage;
     reaction?: ReactionEvent;
+    player?: Player;
+    spinnerId?: string;
   }) => {
-    if (data.type === 'room_state' && data.room) {
-      setRoom(data.room);
-    } else if (data.type === 'spin_started' && data.room) {
+    if (!data || !data.type) return;
+
+    // A new player announces they joined the room
+    if (data.type === 'player_join_request' && data.player) {
+      const incoming = data.player;
+      setRoom((prev) => {
+        const exists = prev.players.some((p) => p.id === incoming.id);
+        const updatedPlayers = exists
+          ? prev.players.map((p) => (p.id === incoming.id ? { ...p, ...incoming, lastSeen: Date.now() } : p))
+          : [...prev.players, { ...incoming, lastSeen: Date.now() }];
+
+        const updatedRoom = {
+          ...prev,
+          players: updatedPlayers,
+        };
+
+        // If I was already in the room, send back full state sync so the newcomer gets our state
+        if (incoming.id !== player.id) {
+          setTimeout(() => {
+            try {
+              mqttHandleRef.current?.publish('sync', {
+                type: 'room_state_sync',
+                room: updatedRoom,
+              });
+            } catch {
+              // ignore
+            }
+          }, 150);
+        }
+
+        return updatedRoom;
+      });
+      return;
+    }
+
+    // Full Room State Sync (from host or peer)
+    if ((data.type === 'room_state' || data.type === 'room_state_sync') && data.room) {
+      const synced = data.room;
+      setRoom((prev) => {
+        // Ensure my own player profile isn't erased
+        const hasMe = synced.players.some((p) => p.id === player.id);
+        const mergedPlayers = hasMe ? synced.players : [player, ...synced.players];
+        return {
+          ...synced,
+          players: mergedPlayers,
+        };
+      });
+      return;
+    }
+
+    // Spin Started
+    if (data.type === 'spin_started' && data.room) {
       setRoom(data.room);
       soundEffects.playSpinSound();
-      if (onSpinStarted && data.newAngle) {
+      if (onSpinStarted && typeof data.newAngle === 'number') {
         onSpinStarted(data.newAngle, data.durationMs || 3500);
       }
-    } else if (data.type === 'spin_ended' && data.room) {
+      return;
+    }
+
+    // Spin Ended
+    if (data.type === 'spin_ended' && data.room) {
       setRoom(data.room);
       soundEffects.playStopChime();
-      const target = data.room.players.find((p: Player) => p.id === data.room?.targetPlayerId);
+      const target = data.room.players.find((p) => p.id === data.room?.targetPlayerId);
       if (target && onSpinEnded) {
         onSpinEnded(target);
       }
       confetti({
-        particleCount: 50,
-        spread: 60,
+        particleCount: 55,
+        spread: 65,
         origin: { y: 0.6 },
         colors: ['#f43f5e', '#fb7185', '#ec4899', '#fda4af', '#fcd34d'],
       });
-    } else if (data.type === 'chat_broadcast' && data.message) {
+      return;
+    }
+
+    // Chat Message
+    if (data.type === 'chat_broadcast' && data.message) {
       const msg = data.message;
       setRoom((prev) => {
-        if (!prev) return prev;
         if (prev.chatMessages.some((m) => m.id === msg.id)) return prev;
         return {
           ...prev,
@@ -142,115 +231,72 @@ export function useGameSocket({
       if (msg.senderId !== player.id) {
         soundEffects.playMessageSound();
       }
-    } else if (data.type === 'reaction_received' && data.reaction) {
+      return;
+    }
+
+    // Heart Reaction
+    if (data.type === 'reaction_received' && data.reaction) {
       const reaction = data.reaction;
       setActiveReactions((prev) => [...prev.slice(-15), reaction]);
       soundEffects.playHeartSound();
       setTimeout(() => {
         setActiveReactions((prev) => prev.filter((r) => r.id !== reaction.id));
       }, 3500);
-    }
-  }, [player.id, onSpinStarted, onSpinEnded]);
-
-  // REST API Polling Sync
-  const syncViaRest = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data && data.room) {
-          const newRoom: RoomState = data.room;
-          const currentHash = JSON.stringify({
-            p: newRoom.players.map((p) => ({ id: p.id, n: p.name, a: p.avatar, s: p.status })),
-            a: newRoom.bottleAngle,
-            sp: newRoom.isSpinning,
-            c: newRoom.chatMessages.length,
-            turn: newRoom.currentTurnIndex,
-            target: newRoom.targetPlayerId,
-            q: newRoom.currentQuestion?.id,
-          });
-
-          if (currentHash !== lastStateHashRef.current) {
-            lastStateHashRef.current = currentHash;
-            setRoom(newRoom);
-          }
-          setIsConnected(true);
-        }
-      }
-    } catch {
-      // offline fallback
-    }
-  }, [roomId]);
-
-  // Join Room via REST
-  const joinViaRest = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/join`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ player, roomName }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.room) {
-          setRoom(data.room);
-          setIsConnected(true);
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }, [roomId, player, roomName]);
-
-  // Connect WebSocket
-  const connectWs = useCallback(() => {
-    if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
       return;
     }
 
-    try {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const host = window.location.host;
-      const wsUrl = `${protocol}//${host}/ws`;
-
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        setIsConnected(true);
-        ws.send(JSON.stringify({
-          type: 'join_room',
-          roomId,
-          roomName,
-          player,
-        }));
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          handleGameEvent(data);
-        } catch {
-          // ignore
-        }
-      };
-
-      ws.onclose = () => {
-        syncViaRest();
-        reconnectTimeoutRef.current = setTimeout(() => {
-          connectWs();
-        }, 3000);
-      };
-
-      ws.onerror = () => {
-        ws.close();
-      };
-    } catch {
-      syncViaRest();
+    // Player Left or Presence Ping
+    if (data.type === 'presence' && data.player) {
+      setRoom((prev) => {
+        const pList = prev.players.map((p) =>
+          p.id === data.player?.id ? { ...p, lastSeen: Date.now() } : p
+        );
+        return { ...prev, players: pList };
+      });
     }
-  }, [roomId, roomName, player, handleGameEvent, syncViaRest]);
+  }, [player, onSpinStarted, onSpinEnded]);
 
-  // Setup BroadcastChannel for 0-latency sync across tabs on Netlify
+  // Setup MQTT Cloud Real-Time Connection
+  useEffect(() => {
+    const mqttHandle = createRoomMqttClient(
+      roomId,
+      player.id,
+      (msg) => {
+        handleGameEvent(msg);
+      },
+      (connected) => {
+        setIsConnected(connected);
+      }
+    );
+
+    mqttHandleRef.current = mqttHandle;
+
+    // Broadcast our join request over MQTT to find any room peers
+    const timer = setTimeout(() => {
+      mqttHandle.publish('join', {
+        type: 'player_join_request',
+        player,
+        timestamp: Date.now(),
+      });
+    }, 400);
+
+    // Heartbeat every 10s to keep connection and peer list alive
+    const pingInterval = setInterval(() => {
+      mqttHandle.publish('ping', {
+        type: 'presence',
+        player,
+      });
+    }, 10000);
+
+    return () => {
+      clearTimeout(timer);
+      clearInterval(pingInterval);
+      mqttHandle.destroy();
+      mqttHandleRef.current = null;
+    };
+  }, [roomId, player, handleGameEvent]);
+
+  // Setup BroadcastChannel for 0-latency same-browser sync
   useEffect(() => {
     try {
       if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
@@ -263,7 +309,7 @@ export function useGameSocket({
         };
       }
     } catch {
-      // BroadcastChannel unsupported
+      // unsupported
     }
     return () => {
       if (bcRef.current) {
@@ -273,182 +319,111 @@ export function useGameSocket({
     };
   }, [roomId, handleGameEvent]);
 
-  // Setup PeerJS WebRTC P2P direct data channel
+  // Setup optional local server WebSocket connection
   useEffect(() => {
-    const cleanRoomKey = roomId.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const myPeerId = `geolove-${cleanRoomKey}-${player.id.replace(/[^a-z0-9]/gi, '')}`;
-    const hostPeerId = `geolove-${cleanRoomKey}-host`;
-
-    let peer: Peer | null = null;
+    let ws: WebSocket | null = null;
     try {
-      peer = new Peer(myPeerId, {
-        debug: 0,
-      });
-      peerRef.current = peer;
+      // Only connect to /ws if not running on external static CDN or file:
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const host = window.location.host;
+      if (host && !host.includes('netlify') && !host.includes('vercel') && !host.includes('github.io')) {
+        ws = new WebSocket(`${protocol}//${host}/ws`);
+        wsRef.current = ws;
 
-      peer.on('open', () => {
-        setIsConnected(true);
-        if (myPeerId !== hostPeerId) {
-          const conn = peer!.connect(hostPeerId);
-          conn.on('open', () => {
-            peerConnectionsRef.current.set(hostPeerId, conn);
-            conn.send(JSON.stringify({ type: 'peer_join', player }));
-          });
-          conn.on('data', (d) => {
-            try {
-              const data = JSON.parse(d as string);
-              handleGameEvent(data);
-            } catch {
-              // ignore
-            }
-          });
-        }
-      });
+        ws.onopen = () => {
+          setIsConnected(true);
+          ws?.send(JSON.stringify({
+            type: 'join_room',
+            roomId,
+            roomName,
+            player,
+          }));
+        };
 
-      peer.on('connection', (conn) => {
-        conn.on('open', () => {
-          peerConnectionsRef.current.set(conn.peer, conn);
-        });
-        conn.on('data', (d) => {
+        ws.onmessage = (event) => {
           try {
-            const data = JSON.parse(d as string);
+            const data = JSON.parse(event.data);
             handleGameEvent(data);
-            broadcastAll(data);
           } catch {
             // ignore
           }
-        });
-        conn.on('close', () => {
-          peerConnectionsRef.current.delete(conn.peer);
-        });
-      });
-
-      peer.on('error', () => {
-        // Fallback gracefully
-      });
-    } catch {
-      // WebRTC error
-    }
-
-    return () => {
-      if (peer) {
-        peer.destroy();
-      }
-      peerConnectionsRef.current.clear();
-    };
-  }, [roomId, player, handleGameEvent, broadcastAll]);
-
-  // Mount effect
-  useEffect(() => {
-    joinViaRest();
-    connectWs();
-
-    // Fast polling fallback: 1.5s ensures instant response on Netlify serverless
-    pollIntervalRef.current = setInterval(() => {
-      syncViaRest();
-    }, 1500);
-
-    return () => {
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-      }
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-    };
-  }, [connectWs, joinViaRest, syncViaRest]);
-
-  // Update profile
-  const updateProfile = useCallback((updatedPlayer: Player) => {
-    setRoom((prev) => {
-      const idx = prev.players.findIndex((p) => p.id === updatedPlayer.id);
-      if (idx >= 0) {
-        const nextPlayers = [...prev.players];
-        nextPlayers[idx] = updatedPlayer;
-        return { ...prev, players: nextPlayers };
-      }
-      return prev;
-    });
-
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'update_profile',
-        roomId,
-        playerId: player.id,
-        player: updatedPlayer,
-      }));
-    }
-    fetch(`/api/rooms/${encodeURIComponent(roomId)}/join`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ player: updatedPlayer }),
-    }).catch(() => {});
-  }, [roomId, player.id]);
-
-  // Spin bottle
-  const spinBottle = useCallback(() => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'spin_bottle',
-        roomId,
-        playerId: player.id,
-      }));
-    } else {
-      // Local/Serverless optimistic spin
-      setRoom((prev) => {
-        if (prev.players.length < 2 || prev.isSpinning) return prev;
-        const spinner = prev.players[prev.currentTurnIndex] || prev.players[0];
-        const otherPlayers = prev.players.filter((p) => p.id !== spinner.id);
-        const chosenTarget = otherPlayers[Math.floor(Math.random() * otherPlayers.length)];
-
-        const targetIndex = prev.players.findIndex((p) => p.id === chosenTarget.id);
-        const totalPlayers = prev.players.length;
-        const angleStep = 360 / totalPlayers;
-        const targetBaseAngle = (targetIndex * angleStep) % 360;
-
-        const fullSpins = 4 + Math.floor(Math.random() * 3);
-        const randomOffset = (Math.random() - 0.5) * Math.min(18, angleStep * 0.35);
-        const finalAngle = fullSpins * 360 + targetBaseAngle + randomOffset;
-
-        const pickQuestion = prev.questions[Math.floor(Math.random() * prev.questions.length)];
-
-        const spinningState: RoomState = {
-          ...prev,
-          isSpinning: true,
-          bottleAngle: finalAngle,
-          spinnerPlayerId: spinner.id,
-          targetPlayerId: null,
-          currentQuestion: null,
         };
 
-        broadcastAll({ type: 'spin_started', room: spinningState, newAngle: finalAngle, durationMs: 3500 });
+        ws.onerror = () => {
+          // Fallback seamlessly to MQTT
+        };
+      }
+    } catch {
+      // ignore
+    }
 
-        setTimeout(() => {
-          setRoom((current) => {
-            const endedState: RoomState = {
-              ...current,
-              isSpinning: false,
-              targetPlayerId: chosenTarget.id,
-              currentQuestion: pickQuestion,
-            };
-            broadcastAll({ type: 'spin_ended', room: endedState });
-            soundEffects.playStopChime();
-            if (onSpinEnded) onSpinEnded(chosenTarget);
-            return endedState;
-          });
-        }, 3500);
+    return () => {
+      if (ws) {
+        ws.close();
+        wsRef.current = null;
+      }
+    };
+  }, [roomId, roomName, player, handleGameEvent]);
 
-        return spinningState;
+  // Spin bottle action
+  const spinBottle = useCallback(() => {
+    setRoom((prev) => {
+      if (prev.players.length < 2 || prev.isSpinning) return prev;
+      const spinner = prev.players[prev.currentTurnIndex] || prev.players[0];
+      const otherPlayers = prev.players.filter((p) => p.id !== spinner.id);
+      const chosenTarget = otherPlayers[Math.floor(Math.random() * otherPlayers.length)];
+
+      const targetIndex = prev.players.findIndex((p) => p.id === chosenTarget.id);
+      const totalPlayers = prev.players.length;
+      const angleStep = 360 / totalPlayers;
+      const targetBaseAngle = (targetIndex * angleStep) % 360;
+
+      const fullSpins = 4 + Math.floor(Math.random() * 3);
+      const randomOffset = (Math.random() - 0.5) * Math.min(18, angleStep * 0.35);
+      const finalAngle = fullSpins * 360 + targetBaseAngle + randomOffset;
+
+      const pickQuestion = prev.questions[Math.floor(Math.random() * prev.questions.length)];
+
+      const spinningState: RoomState = {
+        ...prev,
+        isSpinning: true,
+        bottleAngle: finalAngle,
+        spinnerPlayerId: spinner.id,
+        targetPlayerId: null,
+        currentQuestion: null,
+      };
+
+      // Broadcast spin start across all connected devices
+      broadcastAll({
+        type: 'spin_started',
+        room: spinningState,
+        newAngle: finalAngle,
+        durationMs: 3500,
+        spinnerId: spinner.id,
       });
 
-      fetch(`/api/rooms/${encodeURIComponent(roomId)}/spin`, {
-        method: 'POST',
-      }).catch(() => {});
-    }
-  }, [roomId, player.id, broadcastAll, onSpinEnded]);
+      // After 3.5 seconds, finalize the spin and broadcast completion
+      setTimeout(() => {
+        setRoom((current) => {
+          const endedState: RoomState = {
+            ...current,
+            isSpinning: false,
+            targetPlayerId: chosenTarget.id,
+            currentQuestion: pickQuestion,
+          };
+          broadcastAll({
+            type: 'spin_ended',
+            room: endedState,
+          });
+          soundEffects.playStopChime();
+          if (onSpinEnded) onSpinEnded(chosenTarget);
+          return endedState;
+        });
+      }, 3500);
+
+      return spinningState;
+    });
+  }, [broadcastAll, onSpinEnded]);
 
   // Next turn
   const nextTurn = useCallback(() => {
@@ -464,20 +439,7 @@ export function useGameSocket({
       broadcastAll({ type: 'room_state', room: nextRoom });
       return nextRoom;
     });
-
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'next_turn',
-        roomId,
-      }));
-    } else {
-      fetch(`/api/rooms/${encodeURIComponent(roomId)}/action`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'next_turn' }),
-      }).catch(() => {});
-    }
-  }, [roomId, broadcastAll]);
+  }, [broadcastAll]);
 
   // Reroll question
   const rerollQuestion = useCallback((category?: QuestionCategory) => {
@@ -489,21 +451,7 @@ export function useGameSocket({
       broadcastAll({ type: 'room_state', room: nextRoom });
       return nextRoom;
     });
-
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'reroll_question',
-        roomId,
-        category,
-      }));
-    } else {
-      fetch(`/api/rooms/${encodeURIComponent(roomId)}/action`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'reroll_question', category }),
-      }).catch(() => {});
-    }
-  }, [roomId, broadcastAll]);
+  }, [broadcastAll]);
 
   // Add question
   const addQuestion = useCallback((text: string, category: QuestionCategory) => {
@@ -513,15 +461,7 @@ export function useGameSocket({
       broadcastAll({ type: 'room_state', room: nextRoom });
       return nextRoom;
     });
-
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'add_question',
-        roomId,
-        question: { text, category },
-      }));
-    }
-  }, [roomId, broadcastAll]);
+  }, [broadcastAll]);
 
   // Delete question
   const deleteQuestion = useCallback((questionId: string) => {
@@ -530,15 +470,7 @@ export function useGameSocket({
       broadcastAll({ type: 'room_state', room: nextRoom });
       return nextRoom;
     });
-
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'delete_question',
-        roomId,
-        questionId,
-      }));
-    }
-  }, [roomId, broadcastAll]);
+  }, [broadcastAll]);
 
   // Reset questions
   const resetQuestions = useCallback(() => {
@@ -547,16 +479,9 @@ export function useGameSocket({
       broadcastAll({ type: 'room_state', room: nextRoom });
       return nextRoom;
     });
+  }, [broadcastAll]);
 
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'reset_questions',
-        roomId,
-      }));
-    }
-  }, [roomId, broadcastAll]);
-
-  // Send message
+  // Send chat message
   const sendMessage = useCallback((text: string, type: 'chat' | 'confession' = 'chat') => {
     const msg: ChatMessage = {
       id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -574,21 +499,7 @@ export function useGameSocket({
       broadcastAll({ type: 'chat_broadcast', message: msg, room: nextRoom });
       return nextRoom;
     });
-
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'chat_message',
-        roomId,
-        message: msg,
-      }));
-    } else {
-      fetch(`/api/rooms/${encodeURIComponent(roomId)}/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(msg),
-      }).catch(() => {});
-    }
-  }, [roomId, player, broadcastAll]);
+  }, [player, broadcastAll]);
 
   // Send reaction
   const sendReaction = useCallback((emoji: string, toPlayerId?: string) => {
@@ -607,17 +518,7 @@ export function useGameSocket({
     }, 3500);
 
     broadcastAll({ type: 'reaction_received', reaction });
-
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'send_reaction',
-        roomId,
-        emoji,
-        fromPlayerId: player.id,
-        toPlayerId,
-      }));
-    }
-  }, [roomId, player.id, broadcastAll]);
+  }, [player.id, broadcastAll]);
 
   // Add bot companion
   const addBot = useCallback((botCandidate: { name: string; avatar: string; status: string; bio: string }) => {
@@ -637,21 +538,7 @@ export function useGameSocket({
       broadcastAll({ type: 'room_state', room: nextRoom });
       return nextRoom;
     });
-
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'add_bot',
-        roomId,
-        bot: botCandidate,
-      }));
-    } else {
-      fetch(`/api/rooms/${encodeURIComponent(roomId)}/action`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'add_bot', bot: botCandidate }),
-      }).catch(() => {});
-    }
-  }, [roomId, broadcastAll]);
+  }, [broadcastAll]);
 
   // Remove player / bot
   const removePlayer = useCallback((targetPlayerId: string) => {
@@ -661,21 +548,23 @@ export function useGameSocket({
       broadcastAll({ type: 'room_state', room: nextRoom });
       return nextRoom;
     });
+  }, [broadcastAll]);
 
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'remove_player',
-        roomId,
-        targetPlayerId,
-      }));
-    } else {
-      fetch(`/api/rooms/${encodeURIComponent(roomId)}/action`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'remove_player', playerId: targetPlayerId }),
-      }).catch(() => {});
-    }
-  }, [roomId, broadcastAll]);
+  // Update profile
+  const updateProfile = useCallback((updatedPlayer: Player) => {
+    setRoom((prev) => {
+      const idx = prev.players.findIndex((p) => p.id === updatedPlayer.id);
+      let nextPlayers = [...prev.players];
+      if (idx >= 0) {
+        nextPlayers[idx] = updatedPlayer;
+      } else {
+        nextPlayers = [updatedPlayer, ...nextPlayers];
+      }
+      const nextRoom = { ...prev, players: nextPlayers };
+      broadcastAll({ type: 'player_join_request', player: updatedPlayer, room: nextRoom });
+      return nextRoom;
+    });
+  }, [broadcastAll]);
 
   return {
     room,
@@ -692,6 +581,6 @@ export function useGameSocket({
     addBot,
     removePlayer,
     updateProfile,
-    refetchRoom: syncViaRest,
+    refetchRoom: () => {},
   };
 }

@@ -52,14 +52,30 @@ export const RoomModal: React.FC<RoomModalProps> = ({
     try {
       const res = await fetch('/api/rooms');
       if (res.ok) {
-        const data = await res.json();
-        setActiveRooms(data);
+        const text = await res.text();
+        try {
+          const data = JSON.parse(text);
+          if (Array.isArray(data) && data.length > 0) {
+            setActiveRooms(data);
+            setIsLoadingRooms(false);
+            return;
+          }
+        } catch {
+          // not JSON, fallback to default rooms
+        }
       }
     } catch {
       // ignore
     } finally {
       setIsLoadingRooms(false);
     }
+
+    // Default active community rooms on static hosts (Netlify)
+    setActiveRooms([
+      { id: 'LOVE', name: 'სიყვარულის მაგიდა #LOVE', playersCount: 2, lastActivity: Date.now() },
+      { id: 'ROSE-77', name: 'ვარდების ოთახი #ROSE-77', playersCount: 1, lastActivity: Date.now() },
+      { id: 'SWEET-24', name: 'ტკბილი საღამო #SWEET-24', playersCount: 1, lastActivity: Date.now() },
+    ]);
   };
 
   if (!isOpen) return null;
