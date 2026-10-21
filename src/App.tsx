@@ -289,6 +289,7 @@ export default function App() {
             spinnerPlayerId={room?.spinnerPlayerId || null}
             targetPlayerId={room?.targetPlayerId || null}
             myPlayerId={player.id}
+            activeQuestion={!room?.isSpinning ? room?.currentQuestion : null}
             onSpin={spinBottle}
             onAddBot={addBot}
             onRemovePlayer={removePlayer}

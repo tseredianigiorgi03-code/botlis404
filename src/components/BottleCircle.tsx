@@ -12,6 +12,7 @@ interface BottleCircleProps {
   spinnerPlayerId: string | null;
   targetPlayerId: string | null;
   myPlayerId: string;
+  activeQuestion?: { text: string; category: string } | null;
   onSpin: () => void;
   onAddBot: (bot: { name: string; avatar: string; status: string; bio: string }) => void;
   onRemovePlayer: (playerId: string) => void;
@@ -26,6 +27,7 @@ export const BottleCircle: React.FC<BottleCircleProps> = ({
   spinnerPlayerId,
   targetPlayerId,
   myPlayerId,
+  activeQuestion,
   onSpin,
   onAddBot,
   onRemovePlayer,
@@ -45,28 +47,35 @@ export const BottleCircle: React.FC<BottleCircleProps> = ({
   };
 
   return (
-    <div className="relative w-full flex flex-col items-center justify-center py-4 px-2 select-none">
-      {/* Turn & Status Indicator Banner */}
-      <div className="mb-4 text-center z-10">
-        <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-slate-900/80 border border-rose-800/50 backdrop-blur-md shadow-lg shadow-rose-950/60">
+    <div className="relative w-full flex flex-col items-center justify-center py-1 sm:py-2 px-1 select-none">
+      {/* Turn & Status Indicator Banner (Displays active state or question directly at table level) */}
+      <div className="mb-2 sm:mb-3 text-center z-10 max-w-lg w-full px-2">
+        <div className="inline-flex items-center gap-2 px-3 sm:px-4 py-1 sm:py-1.5 rounded-full bg-slate-900/90 border border-rose-800/60 backdrop-blur-md shadow-lg shadow-rose-950/60 max-w-full">
           {isSpinning ? (
             <>
-              <RefreshCw className="w-4 h-4 text-rose-400 animate-spin" />
-              <span className="text-xs sm:text-sm font-semibold text-rose-200">
+              <RefreshCw className="w-4 h-4 text-rose-400 animate-spin shrink-0" />
+              <span className="text-xs sm:text-sm font-semibold text-rose-200 truncate">
                 ბოთლი ტრიალებს... ვის აირჩევს ბედი? 💘
+              </span>
+            </>
+          ) : targetPlayer && activeQuestion ? (
+            <>
+              <Flame className="w-4 h-4 text-amber-400 animate-bounce shrink-0" />
+              <span className="text-xs sm:text-sm font-semibold text-rose-100 truncate">
+                <strong className="text-pink-400 underline decoration-pink-500">{targetPlayer.name}</strong>: „{activeQuestion.text}“
               </span>
             </>
           ) : targetPlayer ? (
             <>
-              <Flame className="w-4 h-4 text-amber-400 animate-bounce" />
-              <span className="text-xs sm:text-sm font-semibold text-rose-100">
+              <Flame className="w-4 h-4 text-amber-400 animate-bounce shrink-0" />
+              <span className="text-xs sm:text-sm font-semibold text-rose-100 truncate">
                 ბოთლმა მიუთითა: <strong className="text-pink-400 underline decoration-pink-500">{targetPlayer.name}</strong>-ზე!
               </span>
             </>
           ) : (
             <>
-              <Sparkles className="w-4 h-4 text-amber-300" />
-              <span className="text-xs sm:text-sm font-semibold text-rose-100">
+              <Sparkles className="w-4 h-4 text-amber-300 shrink-0" />
+              <span className="text-xs sm:text-sm font-semibold text-rose-100 truncate">
                 {isMyTurn ? (
                   <span className="text-amber-300 font-bold">შენი ჯერია! დაატრიალე ბოთლი ✨</span>
                 ) : (
@@ -78,8 +87,8 @@ export const BottleCircle: React.FC<BottleCircleProps> = ({
         </div>
       </div>
 
-      {/* Circle Container (Table and Players) */}
-      <div className="relative w-[340px] h-[340px] xs:w-[380px] xs:h-[380px] sm:w-[480px] sm:h-[480px] md:w-[530px] md:h-[530px] flex items-center justify-center">
+      {/* Circle Container (Table and Players) - Compact to avoid any page scrolling on phones */}
+      <div className="relative w-[300px] h-[300px] xs:w-[340px] xs:h-[340px] sm:w-[420px] sm:h-[420px] md:w-[460px] md:h-[460px] flex items-center justify-center">
         {/* Table Background Layer with Romantic Glow and Velvet Wood Texture */}
         <div className="absolute inset-8 sm:inset-12 rounded-full bg-gradient-to-tr from-[#2d071b] via-[#4a0d2a] to-[#200413] border-4 border-rose-900/60 shadow-[0_0_60px_rgba(244,63,94,0.35)] flex items-center justify-center overflow-hidden">
           {/* Subtle concentric rings like a wine barrel / table top */}
@@ -291,8 +300,8 @@ export const BottleCircle: React.FC<BottleCircleProps> = ({
         })}
       </div>
 
-      {/* Main Spin Action & Companions Controls */}
-      <div className="mt-5 flex flex-wrap items-center justify-center gap-3 z-20">
+      {/* Main Spin Action & Companions Controls - Compact and directly below table */}
+      <div className="mt-2 sm:mt-3 flex flex-wrap items-center justify-center gap-2 sm:gap-3 z-20">
         <button
           type="button"
           onClick={() => {
@@ -300,13 +309,13 @@ export const BottleCircle: React.FC<BottleCircleProps> = ({
             onSpin();
           }}
           disabled={isSpinning || players.length < 2}
-          className={`px-6 sm:px-8 py-3 rounded-2xl font-bold text-sm sm:text-base flex items-center gap-2.5 shadow-xl transition-all active:scale-95 ${
+          className={`px-5 sm:px-7 py-2 sm:py-2.5 rounded-2xl font-bold text-xs sm:text-sm flex items-center gap-2 shadow-xl transition-all active:scale-95 cursor-pointer ${
             isSpinning
               ? 'bg-slate-800 text-slate-400 cursor-not-allowed border border-slate-700'
               : 'bg-gradient-to-r from-rose-600 via-pink-600 to-rose-700 hover:from-rose-500 hover:to-pink-500 text-white border border-rose-400/40 shadow-rose-950/80 glow-romantic hover:scale-105'
           }`}
         >
-          <Sparkles className="w-5 h-5 text-amber-300 animate-spin" />
+          <Sparkles className="w-4 h-4 text-amber-300 animate-spin" />
           <span>დაატრიალე ბოთლი! 🍾</span>
         </button>
 
@@ -315,11 +324,11 @@ export const BottleCircle: React.FC<BottleCircleProps> = ({
           <button
             type="button"
             onClick={handleAddRandomCompanion}
-            className="px-3.5 py-2.5 rounded-xl text-xs font-semibold bg-rose-950/40 hover:bg-rose-900/40 text-rose-200 border border-rose-800/50 shadow-md flex items-center gap-1.5 active:scale-95 transition-all"
+            className="px-3 py-2 rounded-xl text-xs font-semibold bg-rose-950/40 hover:bg-rose-900/40 text-rose-200 border border-rose-800/50 shadow-md flex items-center gap-1.5 active:scale-95 transition-all cursor-pointer"
             title="დაამატე ქართველი კომპანიონი მაგიდასთან სათამაშოდ"
           >
             <UserPlus className="w-3.5 h-3.5 text-pink-400" />
-            <span>+ მოთამაშის დამატება</span>
+            <span>+ მოთამაშე</span>
           </button>
         )}
       </div>

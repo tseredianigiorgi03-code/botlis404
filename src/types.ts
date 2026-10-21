@@ -17,6 +17,7 @@ export interface Player {
   isHost?: boolean;
   isBot?: boolean;
   score?: number;
+  lastSeen?: number;
 }
 
 export type QuestionCategory = 'სიმართლე' | 'მოქმედება' | 'აღსარება' | 'ფლირტი' | 'კომპლიმენტი';
