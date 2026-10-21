@@ -76,11 +76,40 @@ interface Room {
   lastActivity: number;
 }
 
+import fs from 'fs';
+
+const STORAGE_FILE = '/tmp/love_bottle_rooms.json';
 const rooms: Map<string, Room> = new Map();
 const socketRooms: Map<WebSocket, { roomId: string; playerId: string }> = new Map();
 
+function saveRooms() {
+  try {
+    const obj: Record<string, Room> = {};
+    for (const [k, v] of rooms.entries()) {
+      obj[k] = v;
+    }
+    fs.writeFileSync(STORAGE_FILE, JSON.stringify(obj));
+  } catch {
+    // ignore
+  }
+}
+
+function loadRooms() {
+  try {
+    if (fs.existsSync(STORAGE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(STORAGE_FILE, 'utf-8'));
+      for (const [k, v] of Object.entries(data)) {
+        rooms.set(k, v as Room);
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+loadRooms();
+
 export function normalizeRoomId(rawId: string | undefined | null): string {
-  if (!rawId) return 'LOVE-77';
+  if (!rawId) return 'LOVE';
   let decoded = String(rawId);
   try {
     decoded = decodeURIComponent(decoded);
@@ -88,7 +117,7 @@ export function normalizeRoomId(rawId: string | undefined | null): string {
     // fallback
   }
   const clean = decoded.trim().toUpperCase().replace(/\s+/g, '-').replace(/[^A-Z0-9\-_ა-ჰ]/gi, '');
-  return clean || 'LOVE-77';
+  return clean || 'LOVE';
 }
 
 function getOrCreateRoom(rawId: string, roomName?: string): Room {
@@ -120,6 +149,7 @@ function getOrCreateRoom(rawId: string, roomName?: string): Room {
       lastActivity: Date.now(),
     };
     rooms.set(roomId, room);
+    saveRooms();
   }
   return room;
 }

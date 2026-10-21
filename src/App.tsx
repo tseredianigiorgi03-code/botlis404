@@ -130,8 +130,17 @@ export default function App() {
 
   const handleSelectRoom = (newRoomId: string) => {
     const clean = newRoomId.trim().toUpperCase();
-    if (clean && clean !== roomId) {
+    if (clean) {
       setRoomId(clean);
+      try {
+        const newUrl = new URL(window.location.href);
+        newUrl.searchParams.set('room', clean);
+        newUrl.hash = clean;
+        window.history.replaceState({}, '', newUrl.toString());
+        localStorage.setItem(STORAGE_KEY_ROOM, clean);
+      } catch {
+        // ignore
+      }
     }
   };
 

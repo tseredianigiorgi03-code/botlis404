@@ -18,17 +18,11 @@ export const InviteModal: React.FC<InviteModalProps> = ({
   const [copiedLink, setCopiedLink] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
 
-  // Determine public share URL:
-  // If in AI Studio private dev environment (ais-dev-), the publicly accessible link is ais-pre-
   const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
-  const isDevHost = currentOrigin.includes('ais-dev-');
-  const publicOrigin = isDevHost
-    ? currentOrigin.replace('ais-dev-', 'ais-pre-')
-    : currentOrigin;
-
   const currentPath = typeof window !== 'undefined' ? window.location.pathname : '/';
-  const shareUrl = `${publicOrigin}${currentPath}?room=${encodeURIComponent(roomId)}`;
-  const directDevUrl = `${currentOrigin}${currentPath}?room=${encodeURIComponent(roomId)}`;
+  // Use exact working URL so QR code immediately opens the active room!
+  const shareUrl = `${currentOrigin}${currentPath}?room=${encodeURIComponent(roomId)}`;
+  const directDevUrl = shareUrl;
 
   useEffect(() => {
     if (isOpen && shareUrl) {
