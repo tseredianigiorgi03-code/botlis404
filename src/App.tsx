@@ -13,7 +13,7 @@ import { InviteModal } from './components/InviteModal';
 import { PlayerActionModal } from './components/PlayerActionModal';
 import { FloatingReactions } from './components/FloatingReactions';
 import { soundEffects } from './utils/audio';
-import { Heart, Sparkles, Users, Share2, DoorOpen, Copy, Check, MessageSquare } from 'lucide-react';
+import { Heart, Sparkles, Users, Share2, DoorOpen, Copy, Check, MessageSquare, QrCode } from 'lucide-react';
 
 const STORAGE_KEY_PLAYER = 'love_bottle_player_ge_v1';
 const STORAGE_KEY_ROOM = 'love_bottle_last_room_v1';
@@ -239,10 +239,10 @@ export default function App() {
             <button
               type="button"
               onClick={() => setIsInviteOpen(true)}
-              className="px-2.5 sm:px-3 py-1 rounded-xl text-xs font-semibold bg-rose-600/30 hover:bg-rose-600/50 text-rose-200 border border-rose-500/40 flex items-center gap-1.5 transition-all shadow-sm active:scale-95"
+              className="px-2.5 sm:px-3 py-1 rounded-xl text-xs font-semibold bg-gradient-to-r from-pink-600/40 to-rose-600/40 hover:from-pink-600/60 hover:to-rose-600/60 text-rose-100 border border-pink-500/50 flex items-center gap-1.5 transition-all shadow-sm active:scale-95"
             >
-              <Share2 className="w-3.5 h-3.5 text-pink-400" />
-              <span className="hidden sm:inline">მოწვევა</span>
+              <QrCode className="w-3.5 h-3.5 text-pink-300" />
+              <span>QR კოდით მოწვევა</span>
             </button>
 
             <button

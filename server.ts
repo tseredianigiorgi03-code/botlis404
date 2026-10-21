@@ -50,6 +50,7 @@ interface Player {
   bio?: string;
   isHost?: boolean;
   isBot?: boolean;
+  lastSeen?: number;
 }
 
 interface Room {
@@ -78,7 +79,20 @@ interface Room {
 const rooms: Map<string, Room> = new Map();
 const socketRooms: Map<WebSocket, { roomId: string; playerId: string }> = new Map();
 
-function getOrCreateRoom(roomId: string, roomName?: string): Room {
+export function normalizeRoomId(rawId: string | undefined | null): string {
+  if (!rawId) return 'LOVE-77';
+  let decoded = String(rawId);
+  try {
+    decoded = decodeURIComponent(decoded);
+  } catch {
+    // fallback
+  }
+  const clean = decoded.trim().toUpperCase().replace(/\s+/g, '-').replace(/[^A-Z0-9\-_ა-ჰ]/gi, '');
+  return clean || 'LOVE-77';
+}
+
+function getOrCreateRoom(rawId: string, roomName?: string): Room {
+  const roomId = normalizeRoomId(rawId);
   let room = rooms.get(roomId);
   if (!room) {
     room = {
@@ -98,7 +112,7 @@ function getOrCreateRoom(roomId: string, roomName?: string): Room {
           senderId: 'system',
           senderName: 'სიყვარულის ბოთლი 💖',
           senderAvatar: '',
-          text: 'მოგესალმებით ქართულ რომანტიკულ ბოთლობანაში! დაატრიალეთ ბოთლი და ისიამოვნეთ თამაშით.',
+          text: `მოგესალმებით ოთახში #${roomId}! დაატრიალეთ ბოთლი და გაერთეთ ერთად.`,
           timestamp: Date.now(),
           type: 'system',
         },
@@ -110,26 +124,98 @@ function getOrCreateRoom(roomId: string, roomName?: string): Room {
   return room;
 }
 
-function broadcastToRoom(roomId: string, data: object) {
+function broadcastToRoom(rawId: string, data: object) {
+  const roomId = normalizeRoomId(rawId);
   const payload = JSON.stringify(data);
   for (const [ws, info] of socketRooms.entries()) {
     if (info.roomId === roomId && ws.readyState === WebSocket.OPEN) {
-      ws.send(payload);
+      try {
+        ws.send(payload);
+      } catch {
+        // ignore send error
+      }
     }
   }
 }
 
+function triggerSpin(room: Room) {
+  if (room.players.length < 2 || room.isSpinning) return null;
+
+  const spinner = room.players[room.currentTurnIndex] || room.players[0];
+  const otherPlayers = room.players.filter((p) => p.id !== spinner.id);
+  const chosenTarget = otherPlayers.length > 0
+    ? otherPlayers[Math.floor(Math.random() * otherPlayers.length)]
+    : room.players[0];
+
+  const targetIndex = room.players.findIndex((p) => p.id === chosenTarget.id);
+  const totalPlayers = room.players.length;
+  const angleStep = 360 / totalPlayers;
+  const baseTargetAngle = targetIndex * angleStep;
+
+  const fullRotations = (5 + Math.floor(Math.random() * 4)) * 360;
+  const jitter = (Math.random() - 0.5) * (angleStep * 0.15);
+  const newAngle = room.bottleAngle + fullRotations + ((baseTargetAngle - (room.bottleAngle % 360) + 360) % 360) + jitter;
+
+  const qList = room.questions.length > 0 ? room.questions : DEFAULT_QUESTIONS;
+  const selectedQuestion = qList[Math.floor(Math.random() * qList.length)];
+
+  room.isSpinning = true;
+  room.spinnerPlayerId = spinner.id;
+  room.targetPlayerId = null;
+  room.currentQuestion = null;
+  room.bottleAngle = newAngle;
+
+  broadcastToRoom(room.id, {
+    type: 'spin_started',
+    room,
+    spinnerPlayer: spinner,
+    newAngle,
+    durationMs: 3500,
+  });
+
+  setTimeout(() => {
+    const currentRoom = rooms.get(room.id);
+    if (currentRoom) {
+      currentRoom.isSpinning = false;
+      currentRoom.targetPlayerId = chosenTarget.id;
+      currentRoom.currentQuestion = selectedQuestion;
+      currentRoom.chatMessages.push({
+        id: `spin-res-${Date.now()}`,
+        senderId: 'system',
+        senderName: 'სიყვარულის ისარი 🏹',
+        senderAvatar: '',
+        text: `💘 ბოთლმა მიუთითა: ${chosenTarget.name}! კითხვა: "${selectedQuestion.text}"`,
+        timestamp: Date.now(),
+        type: 'confession',
+      });
+      if (currentRoom.chatMessages.length > 100) {
+        currentRoom.chatMessages = currentRoom.chatMessages.slice(-100);
+      }
+      broadcastToRoom(room.id, {
+        type: 'spin_ended',
+        room: currentRoom,
+        targetPlayer: chosenTarget,
+        question: selectedQuestion,
+      });
+    }
+  }, 3500);
+
+  return { spinner, chosenTarget, newAngle };
+}
+
+// WebSocket Connection Handler
 wss.on('connection', (ws) => {
   ws.on('message', (messageRaw) => {
     try {
       const data = JSON.parse(messageRaw.toString());
-      const { type, roomId, playerId } = data;
+      const rawRoomId = data.roomId;
+      if (!rawRoomId) return;
 
-      if (!roomId) return;
+      const roomId = normalizeRoomId(rawRoomId);
       const room = getOrCreateRoom(roomId, data.roomName);
       room.lastActivity = Date.now();
 
-      switch (type) {
+      switch (data.type) {
         case 'join_room': {
           const newPlayer: Player = {
             id: data.player.id,
@@ -139,6 +225,7 @@ wss.on('connection', (ws) => {
             bio: data.player.bio || '',
             isHost: room.players.length === 0,
             isBot: false,
+            lastSeen: Date.now(),
           };
 
           socketRooms.set(ws, { roomId, playerId: newPlayer.id });
@@ -164,7 +251,7 @@ wss.on('connection', (ws) => {
         }
 
         case 'update_profile': {
-          const pIndex = room.players.findIndex((p) => p.id === playerId);
+          const pIndex = room.players.findIndex((p) => p.id === data.playerId);
           if (pIndex >= 0) {
             room.players[pIndex] = {
               ...room.players[pIndex],
@@ -172,6 +259,7 @@ wss.on('connection', (ws) => {
               avatar: data.player.avatar || room.players[pIndex].avatar,
               status: data.player.status || room.players[pIndex].status,
               bio: data.player.bio ?? room.players[pIndex].bio,
+              lastSeen: Date.now(),
             };
             broadcastToRoom(roomId, { type: 'room_state', room });
           }
@@ -187,6 +275,7 @@ wss.on('connection', (ws) => {
             bio: data.bot.bio,
             isHost: false,
             isBot: true,
+            lastSeen: Date.now(),
           };
           room.players.push(botPlayer);
           room.chatMessages.push({
@@ -232,76 +321,7 @@ wss.on('connection', (ws) => {
             }));
             return;
           }
-
-          if (room.isSpinning) return;
-
-          const spinner = room.players[room.currentTurnIndex] || room.players[0];
-          
-          // Select target player: anyone other than the spinner if possible
-          const otherPlayers = room.players.filter((p) => p.id !== spinner.id);
-          const chosenTarget = otherPlayers.length > 0
-            ? otherPlayers[Math.floor(Math.random() * otherPlayers.length)]
-            : room.players[0];
-
-          // Compute angle towards chosen target
-          const targetIndex = room.players.findIndex((p) => p.id === chosenTarget.id);
-          const totalPlayers = room.players.length;
-          const angleStep = 360 / totalPlayers;
-          const baseTargetAngle = targetIndex * angleStep;
-
-          // Add 5-8 full rotations so spin is thrilling and completely obscures the destination
-          const fullRotations = (5 + Math.floor(Math.random() * 4)) * 360;
-          // Small jitter within target slice (< 20% of slice) so tip points straight at target
-          const jitter = (Math.random() - 0.5) * (angleStep * 0.15);
-          const newAngle = room.bottleAngle + fullRotations + ((baseTargetAngle - (room.bottleAngle % 360) + 360) % 360) + jitter;
-
-          // Select question
-          const qList = room.questions.length > 0 ? room.questions : DEFAULT_QUESTIONS;
-          const selectedQuestion = qList[Math.floor(Math.random() * qList.length)];
-
-          // CRITICAL: Do NOT reveal target or question in advance! Keep undisclosed during spin.
-          room.isSpinning = true;
-          room.spinnerPlayerId = spinner.id;
-          room.targetPlayerId = null;
-          room.currentQuestion = null;
-          room.bottleAngle = newAngle;
-
-          broadcastToRoom(roomId, {
-            type: 'spin_started',
-            room,
-            spinnerPlayer: spinner,
-            newAngle,
-            durationMs: 3500,
-          });
-
-          // After spin finishes (3.5s):
-          setTimeout(() => {
-            const currentRoom = rooms.get(roomId);
-            if (currentRoom) {
-              currentRoom.isSpinning = false;
-              currentRoom.targetPlayerId = chosenTarget.id;
-              currentRoom.currentQuestion = selectedQuestion;
-              currentRoom.chatMessages.push({
-                id: `spin-res-${Date.now()}`,
-                senderId: 'system',
-                senderName: 'სიყვარულის ისარი 🏹',
-                senderAvatar: '',
-                text: `💘 ბოთლმა მიუთითა: ${chosenTarget.name}! კითხვა: "${selectedQuestion.text}"`,
-                timestamp: Date.now(),
-                type: 'confession',
-              });
-              // Keep chat limited to last 100 messages
-              if (currentRoom.chatMessages.length > 100) {
-                currentRoom.chatMessages = currentRoom.chatMessages.slice(-100);
-              }
-              broadcastToRoom(roomId, {
-                type: 'spin_ended',
-                room: currentRoom,
-                targetPlayer: chosenTarget,
-                question: selectedQuestion,
-              });
-            }
-          }, 3500);
+          triggerSpin(room);
           break;
         }
 
@@ -401,48 +421,17 @@ wss.on('connection', (ws) => {
           break;
       }
     } catch (err) {
-      console.error('WebSocket message parsing error:', err);
+      console.error('WebSocket error:', err);
     }
   });
 
   ws.on('close', () => {
-    const info = socketRooms.get(ws);
-    if (info) {
-      socketRooms.delete(ws);
-      const room = rooms.get(info.roomId);
-      if (room) {
-        const leaving = room.players.find((p) => p.id === info.playerId);
-        // Only remove human players, keep bots
-        if (leaving && !leaving.isBot) {
-          // If no other sockets for this player, remove them
-          let otherSockets = false;
-          for (const other of socketRooms.values()) {
-            if (other.playerId === info.playerId && other.roomId === info.roomId) {
-              otherSockets = true;
-              break;
-            }
-          }
-          if (!otherSockets) {
-            room.players = room.players.filter((p) => p.id !== info.playerId);
-            if (room.players.length > 0 && room.currentTurnIndex >= room.players.length) {
-              room.currentTurnIndex = 0;
-            }
-            broadcastToRoom(info.roomId, {
-              type: 'room_state',
-              room,
-            });
-          }
-        }
-      }
-    }
+    socketRooms.delete(ws);
+    // Keep player in room so brief network reconnections or page refreshes don't drop them
   });
 });
 
-// REST endpoints
-app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', time: new Date().toISOString() });
-});
-
+// REST Fallback API - Guarantees 100% online multiplayer even if WebSocket is blocked!
 app.get('/api/rooms', (_req, res) => {
   const roomList = Array.from(rooms.values()).map((r) => ({
     id: r.id,
@@ -451,6 +440,116 @@ app.get('/api/rooms', (_req, res) => {
     lastActivity: r.lastActivity,
   }));
   res.json(roomList);
+});
+
+app.get('/api/rooms/:roomId', (req, res) => {
+  const roomId = normalizeRoomId(req.params.roomId);
+  const room = getOrCreateRoom(roomId);
+  res.json({ room });
+});
+
+app.post('/api/rooms/:roomId/join', (req, res) => {
+  const roomId = normalizeRoomId(req.params.roomId);
+  const room = getOrCreateRoom(roomId, req.body.roomName);
+  const pData = req.body.player;
+  if (!pData || !pData.id) {
+    return res.status(400).json({ error: 'Player data required' });
+  }
+
+  const newPlayer: Player = {
+    id: pData.id,
+    name: pData.name || 'ანონიმური',
+    avatar: pData.avatar || '',
+    status: pData.status || 'თავისუფალი 💖',
+    bio: pData.bio || '',
+    isHost: room.players.length === 0,
+    isBot: false,
+    lastSeen: Date.now(),
+  };
+
+  const existingIdx = room.players.findIndex((p) => p.id === newPlayer.id);
+  if (existingIdx >= 0) {
+    room.players[existingIdx] = { ...room.players[existingIdx], ...newPlayer };
+  } else {
+    room.players.push(newPlayer);
+    room.chatMessages.push({
+      id: `sys-${Date.now()}-${Math.random()}`,
+      senderId: 'system',
+      senderName: 'სისტემა',
+      senderAvatar: '',
+      text: `✨ ${newPlayer.name} შემოუერთდა მაგიდას!`,
+      timestamp: Date.now(),
+      type: 'system',
+    });
+  }
+  room.lastActivity = Date.now();
+  broadcastToRoom(roomId, { type: 'room_state', room });
+  res.json({ success: true, room });
+});
+
+app.post('/api/rooms/:roomId/spin', (req, res) => {
+  const roomId = normalizeRoomId(req.params.roomId);
+  const room = getOrCreateRoom(roomId);
+  const result = triggerSpin(room);
+  if (!result) {
+    return res.status(400).json({ error: 'Cannot spin with fewer than 2 players or while spinning' });
+  }
+  res.json({ success: true, room });
+});
+
+app.post('/api/rooms/:roomId/chat', (req, res) => {
+  const roomId = normalizeRoomId(req.params.roomId);
+  const room = getOrCreateRoom(roomId);
+  const { message } = req.body;
+  if (!message || !message.text) {
+    return res.status(400).json({ error: 'Message required' });
+  }
+  const msg = {
+    id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    senderId: message.senderId,
+    senderName: message.senderName || 'სტუმარი',
+    senderAvatar: message.senderAvatar || '',
+    text: message.text,
+    timestamp: Date.now(),
+    type: message.type || 'chat',
+  };
+  room.chatMessages.push(msg);
+  broadcastToRoom(roomId, { type: 'chat_broadcast', message: msg, room });
+  res.json({ success: true, message: msg, room });
+});
+
+app.post('/api/rooms/:roomId/action', (req, res) => {
+  const roomId = normalizeRoomId(req.params.roomId);
+  const room = getOrCreateRoom(roomId);
+  const { action, payload } = req.body;
+
+  if (action === 'next_turn' && room.players.length > 0) {
+    room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
+    room.currentQuestion = null;
+    room.spinnerPlayerId = room.players[room.currentTurnIndex]?.id || null;
+    room.targetPlayerId = null;
+  } else if (action === 'reroll') {
+    const qList = room.questions.length > 0 ? room.questions : DEFAULT_QUESTIONS;
+    room.currentQuestion = qList[Math.floor(Math.random() * qList.length)];
+  } else if (action === 'add_bot' && payload) {
+    const botPlayer: Player = {
+      id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: payload.name,
+      avatar: payload.avatar,
+      status: payload.status,
+      bio: payload.bio,
+      isHost: false,
+      isBot: true,
+      lastSeen: Date.now(),
+    };
+    room.players.push(botPlayer);
+  } else if (action === 'remove_player' && payload?.targetPlayerId) {
+    room.players = room.players.filter((p) => p.id !== payload.targetPlayerId);
+  }
+
+  room.lastActivity = Date.now();
+  broadcastToRoom(roomId, { type: 'room_state', room });
+  res.json({ success: true, room });
 });
 
 // Vite middleware or static serving

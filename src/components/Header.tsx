@@ -75,17 +75,17 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="hidden lg:inline text-[10px] text-rose-400/70 border-l border-rose-800/40 pl-1.5">შეცვლა</span>
           </button>
 
-          {/* Invite Friends Button */}
+          {/* Invite Friends & QR Code Button */}
           <button
             onClick={() => {
               soundEffects.playHeartSound();
               onOpenInvite();
             }}
             className="flex items-center gap-1.5 text-xs bg-gradient-to-r from-pink-900/60 to-rose-900/60 hover:from-pink-800/70 hover:to-rose-800/70 text-rose-100 border border-pink-700/50 px-2.5 sm:px-3 py-1.5 rounded-xl transition-all active:scale-95 shadow-md shadow-rose-950/40"
-            title="მოიწვიე მეგობრები შენს ოთახში"
+            title="მოიწვიე მეგობრები QR კოდით ან ბმულით"
           >
             <Share2 className="w-3.5 h-3.5 text-rose-300" />
-            <span className="hidden sm:inline font-semibold">მოწვევა</span>
+            <span className="hidden sm:inline font-semibold">QR / მოწვევა</span>
           </button>
 
           {/* Chat Quick Toggle Button */}
