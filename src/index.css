@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Noto Sans Georgian', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: radial-gradient(circle at 50% 20%, #2b0b1e 0%, #170712 50%, #0a0307 100%);
+    min-height: 100vh;
+    color: #fce7f3;
+    overflow-x: hidden;
+  }
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(15, 3, 10, 0.5);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(244, 63, 94, 0.4);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(244, 63, 94, 0.7);
+}
+
+@keyframes float-heart {
+  0% {
+    transform: translateY(0) scale(0.8) rotate(0deg);
+    opacity: 0;
+  }
+  20% {
+    opacity: 0.8;
+  }
+  80% {
+    opacity: 0.8;
+  }
+  100% {
+    transform: translateY(-120px) scale(1.2) rotate(25deg);
+    opacity: 0;
+  }
+}
+
+.animate-float-heart {
+  animation: float-heart 3s ease-in-out infinite;
+}
+
+@keyframes romantic-glow {
+  0%, 100% {
+    box-shadow: 0 0 25px rgba(244, 63, 94, 0.25), inset 0 0 15px rgba(244, 63, 94, 0.15);
+  }
+  50% {
+    box-shadow: 0 0 45px rgba(244, 63, 94, 0.45), inset 0 0 25px rgba(244, 63, 94, 0.25);
+  }
+}
+
+.glow-romantic {
+  animation: romantic-glow 4s infinite ease-in-out;
+}
