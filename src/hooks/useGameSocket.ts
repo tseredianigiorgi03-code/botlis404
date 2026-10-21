@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Player, RoomState, QuestionCategory, ChatMessage, ReactionEvent } from '../types';
 import { soundEffects } from '../utils/audio';
 import confetti from 'canvas-confetti';
+import { Peer, DataConnection } from 'peerjs';
 
 interface UseGameSocketProps {
   player: Player;
@@ -12,7 +13,7 @@ interface UseGameSocketProps {
 }
 
 function normalizeRoomId(rawId: string | undefined | null): string {
-  if (!rawId) return 'LOVE-77';
+  if (!rawId) return 'LOVE';
   let decoded = String(rawId);
   try {
     decoded = decodeURIComponent(decoded);
@@ -20,7 +21,7 @@ function normalizeRoomId(rawId: string | undefined | null): string {
     // fallback
   }
   const clean = decoded.trim().toUpperCase().replace(/\s+/g, '-').replace(/[^A-Z0-9\-_ა-ჰ]/gi, '');
-  return clean || 'LOVE-77';
+  return clean || 'LOVE';
 }
 
 export function useGameSocket({
@@ -34,12 +35,31 @@ export function useGameSocket({
   const [room, setRoom] = useState<RoomState | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [activeReactions, setActiveReactions] = useState<ReactionEvent[]>([]);
+  
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const lastStateHashRef = useRef<string>('');
+  
+  // WebRTC PeerJS References
+  const peerRef = useRef<Peer | null>(null);
+  const peerConnectionsRef = useRef<Map<string, DataConnection>>(new Map());
 
-  // Dual Fallback: REST Polling to guarantee multiplayer sync across any proxy/network
+  // Broadcast data over WebRTC peer data channels
+  const broadcastWebRTC = useCallback((payload: object) => {
+    const dataStr = JSON.stringify(payload);
+    for (const conn of peerConnectionsRef.current.values()) {
+      if (conn.open) {
+        try {
+          conn.send(dataStr);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }, []);
+
+  // REST API Polling Sync
   const syncViaRest = useCallback(async () => {
     try {
       const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}`);
@@ -47,7 +67,17 @@ export function useGameSocket({
         const data = await res.json();
         if (data && data.room) {
           const newRoom: RoomState = data.room;
-          const currentHash = `${newRoom.players.length}-${newRoom.bottleAngle}-${newRoom.isSpinning}-${newRoom.chatMessages.length}-${newRoom.currentTurnIndex}-${newRoom.targetPlayerId}`;
+          // Comprehensive state hash
+          const currentHash = JSON.stringify({
+            p: newRoom.players.map((p) => ({ id: p.id, n: p.name, a: p.avatar, s: p.status })),
+            a: newRoom.bottleAngle,
+            sp: newRoom.isSpinning,
+            c: newRoom.chatMessages.length,
+            turn: newRoom.currentTurnIndex,
+            target: newRoom.targetPlayerId,
+            q: newRoom.currentQuestion?.id,
+          });
+
           if (currentHash !== lastStateHashRef.current) {
             lastStateHashRef.current = currentHash;
             setRoom(newRoom);
@@ -60,7 +90,7 @@ export function useGameSocket({
     }
   }, [roomId]);
 
-  // Join via REST fallback if needed
+  // Join Room via REST
   const joinViaRest = useCallback(async () => {
     try {
       const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/join`, {
@@ -80,10 +110,61 @@ export function useGameSocket({
     }
   }, [roomId, player, roomName]);
 
-  const connect = useCallback(() => {
-    // Join via REST immediately so user is visible right away
-    joinViaRest();
+  // Handle incoming game events (shared by WS and WebRTC)
+  const handleGameEvent = useCallback((data: {
+    type: string;
+    room?: RoomState;
+    newAngle?: number;
+    durationMs?: number;
+    message?: ChatMessage;
+    reaction?: ReactionEvent;
+  }) => {
+    if (data.type === 'room_state' && data.room) {
+      setRoom(data.room);
+    } else if (data.type === 'spin_started' && data.room) {
+      setRoom(data.room);
+      soundEffects.playSpinSound();
+      if (onSpinStarted && data.newAngle) {
+        onSpinStarted(data.newAngle, data.durationMs || 3500);
+      }
+    } else if (data.type === 'spin_ended' && data.room) {
+      setRoom(data.room);
+      soundEffects.playStopChime();
+      const target = data.room.players.find((p: Player) => p.id === data.room?.targetPlayerId);
+      if (target && onSpinEnded) {
+        onSpinEnded(target);
+      }
+      confetti({
+        particleCount: 50,
+        spread: 60,
+        origin: { y: 0.6 },
+        colors: ['#f43f5e', '#fb7185', '#ec4899', '#fda4af', '#fcd34d'],
+      });
+    } else if (data.type === 'chat_broadcast' && data.message) {
+      const msg = data.message;
+      setRoom((prev) => {
+        if (!prev) return prev;
+        if (prev.chatMessages.some((m) => m.id === msg.id)) return prev;
+        return {
+          ...prev,
+          chatMessages: [...prev.chatMessages, msg],
+        };
+      });
+      if (msg.senderId !== player.id) {
+        soundEffects.playMessageSound();
+      }
+    } else if (data.type === 'reaction_received' && data.reaction) {
+      const reaction = data.reaction;
+      setActiveReactions((prev) => [...prev.slice(-15), reaction]);
+      soundEffects.playHeartSound();
+      setTimeout(() => {
+        setActiveReactions((prev) => prev.filter((r) => r.id !== reaction.id));
+      }, 3500);
+    }
+  }, [player.id, onSpinStarted, onSpinEnded]);
 
+  // Connect WebSocket
+  const connectWs = useCallback(() => {
     if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
       return;
     }
@@ -109,57 +190,16 @@ export function useGameSocket({
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-
-          if (data.type === 'room_state') {
-            setRoom(data.room);
-          } else if (data.type === 'spin_started') {
-            setRoom(data.room);
-            soundEffects.playSpinSound();
-            if (onSpinStarted) {
-              onSpinStarted(data.newAngle, data.durationMs);
-            }
-          } else if (data.type === 'spin_ended') {
-            setRoom(data.room);
-            soundEffects.playStopChime();
-            const target = data.room.players.find((p: Player) => p.id === data.room.targetPlayerId);
-            if (target && onSpinEnded) {
-              onSpinEnded(target);
-            }
-            confetti({
-              particleCount: 50,
-              spread: 60,
-              origin: { y: 0.6 },
-              colors: ['#f43f5e', '#fb7185', '#ec4899', '#fda4af', '#fcd34d'],
-            });
-          } else if (data.type === 'chat_broadcast') {
-            setRoom((prev) => {
-              if (!prev) return prev;
-              return {
-                ...prev,
-                chatMessages: [...prev.chatMessages, data.message],
-              };
-            });
-            if (data.message.senderId !== player.id) {
-              soundEffects.playMessageSound();
-            }
-          } else if (data.type === 'reaction_received') {
-            const reaction = data.reaction;
-            setActiveReactions((prev) => [...prev.slice(-15), reaction]);
-            soundEffects.playHeartSound();
-            setTimeout(() => {
-              setActiveReactions((prev) => prev.filter((r) => r.id !== reaction.id));
-            }, 3500);
-          }
+          handleGameEvent(data);
         } catch (err) {
-          console.error('Error handling WebSocket message:', err);
+          console.error('WS parse error:', err);
         }
       };
 
       ws.onclose = () => {
-        // Fall back to polling immediately
         syncViaRest();
         reconnectTimeoutRef.current = setTimeout(() => {
-          connect();
+          connectWs();
         }, 2000);
       };
 
@@ -167,19 +207,88 @@ export function useGameSocket({
         ws.close();
       };
     } catch {
-      // WS error, REST fallback takes over
       syncViaRest();
     }
-  }, [roomId, roomName, player, onSpinStarted, onSpinEnded, joinViaRest, syncViaRest]);
+  }, [roomId, roomName, player, handleGameEvent, syncViaRest]);
 
+  // Setup PeerJS WebRTC P2P direct data channel
+  useEffect(() => {
+    // Generate clean room peer channel
+    const cleanRoomKey = roomId.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const myPeerId = `geolove-${cleanRoomKey}-${player.id.replace(/[^a-z0-9]/gi, '')}`;
+    const hostPeerId = `geolove-${cleanRoomKey}-host`;
+
+    let peer: Peer | null = null;
+    try {
+      peer = new Peer(myPeerId, {
+        debug: 0,
+      });
+      peerRef.current = peer;
+
+      peer.on('open', () => {
+        setIsConnected(true);
+        // Connect to host if I am not host
+        if (myPeerId !== hostPeerId) {
+          const conn = peer!.connect(hostPeerId);
+          conn.on('open', () => {
+            peerConnectionsRef.current.set(hostPeerId, conn);
+            conn.send(JSON.stringify({ type: 'peer_join', player }));
+          });
+          conn.on('data', (d) => {
+            try {
+              const data = JSON.parse(d as string);
+              handleGameEvent(data);
+            } catch {
+              // ignore
+            }
+          });
+        }
+      });
+
+      peer.on('connection', (conn) => {
+        conn.on('open', () => {
+          peerConnectionsRef.current.set(conn.peer, conn);
+        });
+        conn.on('data', (d) => {
+          try {
+            const data = JSON.parse(d as string);
+            handleGameEvent(data);
+            // Relink/broadcast to other connected peers
+            broadcastWebRTC(data);
+          } catch {
+            // ignore
+          }
+        });
+        conn.on('close', () => {
+          peerConnectionsRef.current.delete(conn.peer);
+        });
+      });
+
+      peer.on('error', () => {
+        // Fallback gracefully to WebSockets and REST
+      });
+    } catch {
+      // WebRTC not supported, WebSocket + REST will handle it
+    }
+
+    return () => {
+      if (peer) {
+        peer.destroy();
+      }
+      peerConnectionsRef.current.clear();
+    };
+  }, [roomId, player, handleGameEvent, broadcastWebRTC]);
+
+  // Mount effect
   useEffect(() => {
     setRoom(null);
-    connect();
+    joinViaRest();
+    connectWs();
 
-    // Active polling interval every 1.5s to guarantee 100% real-time sync across devices
+    // Fast polling fallback: 1.2s ensures instant response across any network
     pollIntervalRef.current = setInterval(() => {
       syncViaRest();
-    }, 1500);
+    }, 1200);
 
     return () => {
       if (reconnectTimeoutRef.current) {
@@ -192,7 +301,7 @@ export function useGameSocket({
         wsRef.current.close();
       }
     };
-  }, [connect, syncViaRest]);
+  }, [connectWs, joinViaRest, syncViaRest]);
 
   // Update profile
   const updateProfile = useCallback((updatedPlayer: Player) => {
@@ -204,7 +313,6 @@ export function useGameSocket({
         player: updatedPlayer,
       }));
     }
-    // Also post via REST
     fetch(`/api/rooms/${encodeURIComponent(roomId)}/join`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -314,7 +422,9 @@ export function useGameSocket({
         body: JSON.stringify({ message: msg }),
       }).then(syncViaRest).catch(() => {});
     }
-  }, [roomId, player, syncViaRest]);
+    // Also broadcast directly over WebRTC
+    broadcastWebRTC({ type: 'chat_broadcast', message: { ...msg, id: `p2p-${Date.now()}` } });
+  }, [roomId, player, syncViaRest, broadcastWebRTC]);
 
   // Send reaction
   const sendReaction = useCallback((emoji: string, toPlayerId?: string) => {
@@ -327,7 +437,17 @@ export function useGameSocket({
         toPlayerId,
       }));
     }
-  }, [roomId, player.id]);
+    broadcastWebRTC({
+      type: 'reaction_received',
+      reaction: {
+        id: `react-${Date.now()}-${Math.random()}`,
+        emoji,
+        fromPlayerId: player.id,
+        toPlayerId,
+        timestamp: Date.now(),
+      },
+    });
+  }, [roomId, player.id, broadcastWebRTC]);
 
   // Add bot companion
   const addBot = useCallback((botCandidate: { name: string; avatar: string; status: string; bio: string }) => {

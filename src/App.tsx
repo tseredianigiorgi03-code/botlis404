@@ -15,11 +15,10 @@ import { FloatingReactions } from './components/FloatingReactions';
 import { soundEffects } from './utils/audio';
 import { Heart, Sparkles, Users, Share2, DoorOpen, Copy, Check, MessageSquare, QrCode } from 'lucide-react';
 
-const STORAGE_KEY_PLAYER = 'love_bottle_player_ge_v1';
-const STORAGE_KEY_ROOM = 'love_bottle_last_room_v1';
+const STORAGE_KEY_PLAYER = 'love_bottle_player_ge_v2';
 
 export default function App() {
-  // Initialize player from localStorage or default
+  // Initialize player with distinct identity per browser/device
   const [player, setPlayer] = useState<Player>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY_PLAYER);
@@ -29,18 +28,21 @@ export default function App() {
     } catch {
       // fallback
     }
-    const defaultAvatar = AVATAR_PRESETS[0].url;
+    const sampleNames = ['გიორგი 💖', 'ნინო ✨', 'სანდრო 🍷', 'მარიამი 🌸', 'ლუკა 🔥', 'ანა 🌹'];
+    const pickedName = sampleNames[Math.floor(Math.random() * sampleNames.length)];
+    const pickedAvatar = AVATAR_PRESETS[Math.floor(Math.random() * AVATAR_PRESETS.length)].url;
+
     return {
       id: `p-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-      name: 'გიორგი',
-      avatar: defaultAvatar,
+      name: pickedName,
+      avatar: pickedAvatar,
       status: 'თავისუფალი 💖',
       bio: 'მზად ვარ რომანტიკული კითხვებისთვის! ✨',
-      isHost: true,
+      isHost: false,
     };
   });
 
-  // Determine Room ID from URL search param, URL hash, localStorage, or default
+  // Canonical Room ID: default is 'LOVE' for all visitors, or URL search/hash
   const [roomId, setRoomId] = useState<string>(() => {
     try {
       const searchParam = new URLSearchParams(window.location.search).get('room');
@@ -51,14 +53,10 @@ export default function App() {
       if (hash) {
         return hash.toUpperCase();
       }
-      const saved = localStorage.getItem(STORAGE_KEY_ROOM);
-      if (saved && saved.trim()) {
-        return saved.trim().toUpperCase();
-      }
     } catch {
       // fallback
     }
-    return 'LOVE-77';
+    return 'LOVE';
   });
 
   // Sound state
@@ -73,14 +71,13 @@ export default function App() {
   const [selectedPlayerForAction, setSelectedPlayerForAction] = useState<Player | null>(null);
   const [copiedQuick, setCopiedQuick] = useState(false);
 
-  // Sync room ID to URL search & hash and localStorage
+  // Sync room ID to URL search & hash
   useEffect(() => {
     try {
       const newUrl = new URL(window.location.href);
       newUrl.searchParams.set('room', roomId);
       newUrl.hash = roomId;
       window.history.replaceState({}, '', newUrl.toString());
-      localStorage.setItem(STORAGE_KEY_ROOM, roomId);
     } catch {
       // ignore
     }
@@ -102,7 +99,7 @@ export default function App() {
     if (next) soundEffects.playHeartSound();
   };
 
-  // WebSocket hook connected to the specific room ID
+  // WebSocket + WebRTC + REST triple-redundant hook
   const {
     room,
     isConnected,
@@ -118,6 +115,7 @@ export default function App() {
     addBot,
     removePlayer,
     updateProfile,
+    refetchRoom,
   } = useGameSocket({
     player,
     roomId,
@@ -137,7 +135,6 @@ export default function App() {
         newUrl.searchParams.set('room', clean);
         newUrl.hash = clean;
         window.history.replaceState({}, '', newUrl.toString());
-        localStorage.setItem(STORAGE_KEY_ROOM, clean);
       } catch {
         // ignore
       }
@@ -155,6 +152,11 @@ export default function App() {
   // Current players list fallback to local player if room is initializing
   const playersList = useMemo(() => {
     if (room && room.players.length > 0) {
+      // Ensure local player is included if missing
+      const exists = room.players.some((p) => p.id === player.id);
+      if (!exists) {
+        return [player, ...room.players];
+      }
       return room.players;
     }
     return [player];
@@ -209,7 +211,12 @@ export default function App() {
         {/* Room Info Bar: prominent room code + invite + change room + chat toggle */}
         <div className="w-full flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-2xl bg-slate-900/60 border border-rose-900/40 backdrop-blur-sm mb-2 text-xs">
           <div className="flex items-center gap-2">
-            <span className="text-rose-300/80 font-medium hidden sm:inline">ოთახის კოდი:</span>
+            <span className="flex items-center gap-1.5 text-emerald-400 font-bold bg-emerald-950/60 px-2 py-0.5 rounded-lg border border-emerald-800/40">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span>LIVE</span>
+            </span>
+
+            <span className="text-rose-300/80 font-medium hidden sm:inline">მაგიდა:</span>
             <div className="flex items-center gap-1.5 bg-rose-950/70 border border-rose-800/60 px-2.5 py-1 rounded-xl">
               <span className="font-mono font-bold text-pink-300 text-sm">#{roomId}</span>
               <button
@@ -221,13 +228,19 @@ export default function App() {
                 {copiedQuick ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
               </button>
             </div>
+
+            <div className="text-[11px] text-rose-300 bg-slate-950/60 px-2 py-1 rounded-xl border border-rose-900/40 flex items-center gap-1">
+              <Users className="w-3 h-3 text-pink-400" />
+              <span>{playersList.length} მოთამაშე</span>
+            </div>
+
             <button
               type="button"
               onClick={() => setIsRoomsOpen(true)}
               className="text-[11px] text-pink-400 hover:text-pink-300 underline font-semibold flex items-center gap-1"
             >
               <DoorOpen className="w-3.5 h-3.5" />
-              <span>სხვა ოთახი</span>
+              <span className="hidden sm:inline">ოთახის შეცვლა</span>
             </button>
           </div>
 
@@ -245,6 +258,7 @@ export default function App() {
               <span>ჩატი ({room?.chatMessages?.length || 0})</span>
             </button>
 
+            {/* QR Invite Button */}
             <button
               type="button"
               onClick={() => setIsInviteOpen(true)}
@@ -259,7 +273,7 @@ export default function App() {
               onClick={() => setIsProfileOpen(true)}
               className="text-[11px] text-rose-300/80 hover:text-rose-100 flex items-center gap-1 bg-slate-950/60 px-2 py-1 rounded-xl border border-rose-900/40"
             >
-              <span>სახელი: <strong className="text-white">{player.name}</strong></span>
+              <span>შენ: <strong className="text-white">{player.name}</strong></span>
               <Sparkles className="w-3 h-3 text-amber-300" />
             </button>
           </div>
@@ -320,9 +334,9 @@ export default function App() {
         <p className="flex items-center justify-center gap-1.5 flex-wrap">
           <span>სიყვარულის ბოთლობანა ონლაინ</span>
           <span>•</span>
-          <span>ოთახი: #{roomId}</span>
+          <span>საერთო მაგიდა: #{roomId}</span>
           <span>•</span>
-          <span>გაუზიარე კოდი მეგობარს</span>
+          <span>დაასკანერე QR კოდი ტელეფონით</span>
           <Heart className="w-3 h-3 text-rose-500 fill-rose-500 inline" />
         </p>
       </footer>
