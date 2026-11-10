@@ -18,6 +18,9 @@ export interface Player {
   isBot?: boolean;
   score?: number;
   lastSeen?: number;
+  truthsCompleted?: number;
+  daresCompleted?: number;
+  spinsCount?: number;
 }
 
 export type QuestionCategory = 'სიმართლე' | 'მოქმედება' | 'აღსარება' | 'ფლირტი' | 'კომპლიმენტი';
@@ -27,6 +30,24 @@ export interface QuestionItem {
   text: string;
   category: QuestionCategory;
   isCustom?: boolean;
+}
+
+export interface CompletedQuestionRecord {
+  id: string;
+  questionText: string;
+  category: QuestionCategory;
+  targetPlayerId: string;
+  targetPlayerName: string;
+  spinnerPlayerId?: string;
+  spinnerPlayerName?: string;
+  completedAt: number;
+}
+
+export interface RoomStats {
+  truthsCompleted: number;
+  daresCompleted: number;
+  totalSpins: number;
+  otherCompleted?: number;
 }
 
 export interface ChatMessage {
@@ -62,4 +83,7 @@ export interface RoomState {
   questions: QuestionItem[];
   chatMessages: ChatMessage[];
   lastActivity: number;
+  stats?: RoomStats;
+  history?: CompletedQuestionRecord[];
 }
+

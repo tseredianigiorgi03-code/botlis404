@@ -37,6 +37,13 @@ function createDefaultRoom(roomId: string, localPlayer: Player, roomName?: strin
     targetPlayerId: null,
     currentQuestion: null,
     questions: INITIAL_GEORGIAN_QUESTIONS,
+    stats: {
+      truthsCompleted: 0,
+      daresCompleted: 0,
+      totalSpins: 0,
+      otherCompleted: 0,
+    },
+    history: [],
     chatMessages: [
       {
         id: `welcome-${roomId}`,
@@ -384,13 +391,32 @@ export function useGameSocket({
 
       const pickQuestion = prev.questions[Math.floor(Math.random() * prev.questions.length)];
 
+      const currentStats = prev.stats || {
+        truthsCompleted: 0,
+        daresCompleted: 0,
+        totalSpins: 0,
+        otherCompleted: 0,
+      };
+
+      const updatedPlayers = prev.players.map((p) => {
+        if (p.id === spinner.id) {
+          return { ...p, spinsCount: (p.spinsCount || 0) + 1 };
+        }
+        return p;
+      });
+
       const spinningState: RoomState = {
         ...prev,
+        players: updatedPlayers,
         isSpinning: true,
         bottleAngle: finalAngle,
         spinnerPlayerId: spinner.id,
         targetPlayerId: null,
         currentQuestion: null,
+        stats: {
+          ...currentStats,
+          totalSpins: currentStats.totalSpins + 1,
+        },
       };
 
       // Broadcast spin start across all connected devices
@@ -425,6 +451,99 @@ export function useGameSocket({
     });
   }, [broadcastAll, onSpinEnded]);
 
+  // Complete question (Truth or Dare completed by target player)
+  const completeQuestion = useCallback(() => {
+    setRoom((prev) => {
+      if (!prev.currentQuestion || !prev.targetPlayerId) {
+        // Fallback to simple nextTurn if no active question
+        const nextTurnIndex = (prev.currentTurnIndex + 1) % Math.max(1, prev.players.length);
+        const nextRoom: RoomState = {
+          ...prev,
+          currentTurnIndex: nextTurnIndex,
+          targetPlayerId: null,
+          currentQuestion: null,
+          isSpinning: false,
+        };
+        broadcastAll({ type: 'room_state', room: nextRoom });
+        return nextRoom;
+      }
+
+      const q = prev.currentQuestion;
+      const targetId = prev.targetPlayerId;
+      const targetP = prev.players.find((p) => p.id === targetId);
+      const spinnerP = prev.players.find((p) => p.id === prev.spinnerPlayerId);
+
+      const isTruth = q.category === 'სიმართლე';
+      const isDare = q.category === 'მოქმედება';
+
+      const prevStats = prev.stats || {
+        truthsCompleted: 0,
+        daresCompleted: 0,
+        totalSpins: 0,
+        otherCompleted: 0,
+      };
+
+      const updatedStats = {
+        ...prevStats,
+        truthsCompleted: prevStats.truthsCompleted + (isTruth ? 1 : 0),
+        daresCompleted: prevStats.daresCompleted + (isDare ? 1 : 0),
+        otherCompleted: (prevStats.otherCompleted || 0) + (!isTruth && !isDare ? 1 : 0),
+      };
+
+      const updatedPlayers = prev.players.map((p) => {
+        if (p.id === targetId) {
+          return {
+            ...p,
+            score: (p.score || 0) + 1,
+            truthsCompleted: (p.truthsCompleted || 0) + (isTruth ? 1 : 0),
+            daresCompleted: (p.daresCompleted || 0) + (isDare ? 1 : 0),
+          };
+        }
+        return p;
+      });
+
+      const record = {
+        id: `comp-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        questionText: q.text,
+        category: q.category,
+        targetPlayerId: targetId,
+        targetPlayerName: targetP?.name || 'მოთამაშე',
+        spinnerPlayerId: spinnerP?.id,
+        spinnerPlayerName: spinnerP?.name,
+        completedAt: Date.now(),
+      };
+
+      const nextHistory = [record, ...(prev.history || [])].slice(0, 50);
+
+      // System announcement message in chat
+      const sysMessage: ChatMessage = {
+        id: `sys-${Date.now()}`,
+        senderId: 'system',
+        senderName: 'სიყვარულის ბოთლი 🏆',
+        senderAvatar: '',
+        text: `✨ ${targetP?.name || 'მოთამაშემ'} წარმატებით შეასრულა: [${q.category}] „${q.text.slice(0, 45)}${q.text.length > 45 ? '...' : ''}“`,
+        timestamp: Date.now(),
+        type: 'system',
+      };
+
+      const nextTurnIndex = (prev.currentTurnIndex + 1) % Math.max(1, prev.players.length);
+      const nextRoom: RoomState = {
+        ...prev,
+        players: updatedPlayers,
+        currentTurnIndex: nextTurnIndex,
+        targetPlayerId: null,
+        currentQuestion: null,
+        isSpinning: false,
+        stats: updatedStats,
+        history: nextHistory,
+        chatMessages: [...prev.chatMessages, sysMessage].slice(-100),
+      };
+
+      broadcastAll({ type: 'room_state', room: nextRoom });
+      return nextRoom;
+    });
+  }, [broadcastAll]);
+
   // Next turn
   const nextTurn = useCallback(() => {
     setRoom((prev) => {
@@ -440,6 +559,7 @@ export function useGameSocket({
       return nextRoom;
     });
   }, [broadcastAll]);
+
 
   // Reroll question
   const rerollQuestion = useCallback((category?: QuestionCategory) => {
@@ -572,6 +692,7 @@ export function useGameSocket({
     activeReactions,
     spinBottle,
     nextTurn,
+    completeQuestion,
     rerollQuestion,
     addQuestion,
     deleteQuestion,

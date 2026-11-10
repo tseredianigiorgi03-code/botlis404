@@ -50,7 +50,11 @@ interface Player {
   bio?: string;
   isHost?: boolean;
   isBot?: boolean;
+  score?: number;
   lastSeen?: number;
+  truthsCompleted?: number;
+  daresCompleted?: number;
+  spinsCount?: number;
 }
 
 interface Room {
@@ -74,7 +78,22 @@ interface Room {
     type?: string;
   }>;
   lastActivity: number;
+  stats?: {
+    truthsCompleted: number;
+    daresCompleted: number;
+    totalSpins: number;
+    otherCompleted?: number;
+  };
+  history?: Array<{
+    id: string;
+    questionText: string;
+    category: string;
+    targetPlayerId: string;
+    targetPlayerName: string;
+    completedAt: number;
+  }>;
 }
+
 
 import fs from 'fs';
 
@@ -352,6 +371,37 @@ wss.on('connection', (ws) => {
             return;
           }
           triggerSpin(room);
+          break;
+        }
+
+        case 'complete_question': {
+          if (!room.stats) {
+            room.stats = { truthsCompleted: 0, daresCompleted: 0, totalSpins: 0, otherCompleted: 0 };
+          }
+          if (room.currentQuestion && room.targetPlayerId) {
+            const isTruth = room.currentQuestion.category === 'სიმართლე';
+            const isDare = room.currentQuestion.category === 'მოქმედება';
+            room.stats.truthsCompleted += isTruth ? 1 : 0;
+            room.stats.daresCompleted += isDare ? 1 : 0;
+            if (!isTruth && !isDare) {
+              room.stats.otherCompleted = (room.stats.otherCompleted || 0) + 1;
+            }
+
+            const targetP = room.players.find((p) => p.id === room.targetPlayerId);
+            if (targetP) {
+              targetP.score = (targetP.score || 0) + 1;
+              targetP.truthsCompleted = (targetP.truthsCompleted || 0) + (isTruth ? 1 : 0);
+              targetP.daresCompleted = (targetP.daresCompleted || 0) + (isDare ? 1 : 0);
+            }
+          }
+
+          if (room.players.length > 0) {
+            room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
+            room.currentQuestion = null;
+            room.spinnerPlayerId = room.players[room.currentTurnIndex]?.id || null;
+            room.targetPlayerId = null;
+          }
+          broadcastToRoom(roomId, { type: 'room_state', room });
           break;
         }
 

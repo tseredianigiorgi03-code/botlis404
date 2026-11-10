@@ -10,10 +10,11 @@ import { QuestionsManager } from './components/QuestionsManager';
 import { ProfileModal } from './components/ProfileModal';
 import { RoomModal } from './components/RoomModal';
 import { InviteModal } from './components/InviteModal';
+import { GameStatsModal } from './components/GameStatsModal';
 import { PlayerActionModal } from './components/PlayerActionModal';
 import { FloatingReactions } from './components/FloatingReactions';
 import { soundEffects } from './utils/audio';
-import { Heart, Sparkles, Users, Share2, DoorOpen, Copy, Check, MessageSquare, QrCode } from 'lucide-react';
+import { Heart, Sparkles, Users, Share2, DoorOpen, Copy, Check, MessageSquare, QrCode, Trophy } from 'lucide-react';
 
 const STORAGE_KEY_PLAYER = 'love_bottle_player_ge_v2';
 
@@ -68,6 +69,7 @@ export default function App() {
   const [isQuestionsOpen, setIsQuestionsOpen] = useState(false);
   const [isRoomsOpen, setIsRoomsOpen] = useState(false);
   const [isInviteOpen, setIsInviteOpen] = useState(false);
+  const [isStatsOpen, setIsStatsOpen] = useState(false);
   const [selectedPlayerForAction, setSelectedPlayerForAction] = useState<Player | null>(null);
   const [copiedQuick, setCopiedQuick] = useState(false);
 
@@ -106,6 +108,7 @@ export default function App() {
     activeReactions,
     spinBottle,
     nextTurn,
+    completeQuestion,
     rerollQuestion,
     addQuestion,
     deleteQuestion,
@@ -120,6 +123,7 @@ export default function App() {
     player,
     roomId,
   });
+
 
   const handleSaveProfile = (updated: Player) => {
     setPlayer(updated);
@@ -201,6 +205,7 @@ export default function App() {
         onOpenQuestions={() => setIsQuestionsOpen(true)}
         onOpenInvite={() => setIsInviteOpen(true)}
         onOpenRooms={() => setIsRoomsOpen(true)}
+        onOpenStats={() => setIsStatsOpen(true)}
         onToggleChat={() => setIsChatOpen(!isChatOpen)}
         soundEnabled={soundEnabled}
         onToggleSound={handleToggleSound}
@@ -245,6 +250,22 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Quick Stats Button */}
+            <button
+              type="button"
+              onClick={() => {
+                soundEffects.playHeartSound();
+                setIsStatsOpen(true);
+              }}
+              className="px-2.5 sm:px-3 py-1 rounded-xl text-xs font-semibold bg-gradient-to-r from-amber-950/70 to-rose-950/70 hover:from-amber-900/80 hover:to-rose-900/80 text-amber-200 border border-amber-600/50 flex items-center gap-1.5 transition-all shadow-sm active:scale-95"
+              title="ოთახის სტატისტიკა (სიმართლე vs მოქმედება)"
+            >
+              <Trophy className="w-3.5 h-3.5 text-amber-400" />
+              <span className="font-bold">
+                {room?.stats ? `${room.stats.truthsCompleted} vs ${room.stats.daresCompleted}` : 'სტატისტიკა'}
+              </span>
+            </button>
+
             {/* Quick Chat Button in toolbar */}
             <button
               type="button"
@@ -279,6 +300,7 @@ export default function App() {
           </div>
         </div>
 
+
         {/* Centerpiece: Bottle & Players Circle */}
         <div className="w-full flex-1 flex items-center justify-center my-1 sm:my-2">
           <BottleCircle
@@ -310,7 +332,7 @@ export default function App() {
             spinnerPlayer={spinnerPlayer}
             targetPlayer={targetPlayer}
             onDone={() => {
-              nextTurn();
+              completeQuestion();
             }}
             onReroll={() => {
               rerollQuestion();
@@ -336,6 +358,18 @@ export default function App() {
           <span>სიყვარულის ბოთლობანა ონლაინ</span>
           <span>•</span>
           <span>საერთო მაგიდა: #{roomId}</span>
+          <span>•</span>
+          <button
+            type="button"
+            onClick={() => {
+              soundEffects.playHeartSound();
+              setIsStatsOpen(true);
+            }}
+            className="text-pink-300 hover:text-white underline font-semibold flex items-center gap-1 inline-flex"
+          >
+            <Trophy className="w-3 h-3 text-amber-400" />
+            <span>სტატისტიკა</span>
+          </button>
           <span>•</span>
           <span>დაასკანერე QR კოდი ტელეფონით</span>
           <Heart className="w-3 h-3 text-rose-500 fill-rose-500 inline" />
@@ -365,6 +399,15 @@ export default function App() {
         roomId={roomId}
       />
 
+      <GameStatsModal
+        isOpen={isStatsOpen}
+        onClose={() => setIsStatsOpen(false)}
+        roomId={roomId}
+        players={playersList}
+        stats={room?.stats}
+        history={room?.history}
+      />
+
       <QuestionsManager
         isOpen={isQuestionsOpen}
         onClose={() => setIsQuestionsOpen(false)}
@@ -383,3 +426,4 @@ export default function App() {
     </div>
   );
 }
+

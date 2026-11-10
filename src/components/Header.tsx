@@ -1,5 +1,5 @@
 import React from 'react';
-import { Heart, Volume2, VolumeX, ListPlus, Share2, Sparkles, DoorOpen, MessageSquare } from 'lucide-react';
+import { Heart, Volume2, VolumeX, ListPlus, Share2, Sparkles, DoorOpen, MessageSquare, Trophy } from 'lucide-react';
 import { Player } from '../types';
 import { soundEffects } from '../utils/audio';
 
@@ -15,6 +15,7 @@ interface HeaderProps {
   onOpenQuestions: () => void;
   onOpenInvite: () => void;
   onOpenRooms: () => void;
+  onOpenStats: () => void;
   onToggleChat: () => void;
   soundEnabled: boolean;
   onToggleSound: () => void;
@@ -30,6 +31,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenQuestions,
   onOpenInvite,
   onOpenRooms,
+  onOpenStats,
   onToggleChat,
   soundEnabled,
   onToggleSound,
@@ -118,6 +120,19 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="px-1.5 py-0.2 rounded-full bg-rose-500/30 text-rose-200 text-[11px] font-semibold border border-rose-400/30">
               {questionsCount}
             </span>
+          </button>
+
+          {/* Stats Button */}
+          <button
+            onClick={() => {
+              soundEffects.playHeartSound();
+              onOpenStats();
+            }}
+            className="flex items-center gap-1.5 text-xs bg-gradient-to-r from-amber-950/60 to-rose-950/60 hover:from-amber-900/60 hover:to-rose-900/60 text-amber-200 border border-amber-600/40 px-2 sm:px-3 py-1.5 rounded-xl transition-all active:scale-95 shadow-sm"
+            title="ოთახის სტატისტიკა: სიმართლე vs მოქმედება და აქტიური მოთამაშე"
+          >
+            <Trophy className="w-3.5 h-3.5 text-amber-400" />
+            <span className="hidden md:inline font-semibold">სტატისტიკა</span>
           </button>
 
           {/* Sound Toggle */}
